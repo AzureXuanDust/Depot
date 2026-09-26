@@ -49,7 +49,7 @@ jobs:
     if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
     env:
       SERVER_COMMIT: ${{ needs.check.outputs.server_commit }}
       DATA_COMMIT: ${{ needs.check.outputs.data_commit }}
