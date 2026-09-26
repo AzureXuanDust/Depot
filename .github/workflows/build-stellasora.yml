@@ -7,8 +7,6 @@ on:
         description: 强制重建发布（即使上游未变）
         type: boolean
         default: false
-  schedule:
-    - cron: '41 22,10 * * *'
 
 concurrency:
   group: build-stellasora
