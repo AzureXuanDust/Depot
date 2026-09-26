@@ -1,0 +1,183 @@
+name: Build StellaSora
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 强制重建发布（即使上游未变）
+        type: boolean
+        default: false
+  schedule:
+    - cron: '41 22,10 * * *'
+
+concurrency:
+  group: build-stellasora
+  cancel-in-progress: false
+
+env:
+  NEBULA_REPO: AzureXuanVerse/Nebula-P
+  DATA_REPO: https://github.com/Hiro420/StellaSoraData.git
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.c.outputs.build }}
+      data_commit: ${{ steps.c.outputs.data_commit }}
+      server_commit: ${{ steps.c.outputs.server_commit }}
+    steps:
+      - id: c
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          server_commit=$(git ls-remote "https://x-access-token:${GH_PAT}@github.com/${NEBULA_REPO}.git" HEAD | cut -f1)
+          data_commit=$(git ls-remote "$DATA_REPO" HEAD | cut -f1)
+          echo "server_commit=$server_commit" >> "$GITHUB_OUTPUT"
+          echo "data_commit=$data_commit" >> "$GITHUB_OUTPUT"
+          prev=$(curl -fsSL "https://upd.tianjg.com/StellaSora/latest.json?t=$RANDOM" || echo '{}')
+          pd=$(echo "$prev" | grep -o '"data_commit":"[^"]*"' | cut -d'"' -f4)
+          ps=$(echo "$prev" | grep -o '"server_commit":"[^"]*"' | cut -d'"' -f4)
+          if [ "${{ inputs.force }}" != "true" ] && [ -n "$server_commit" ] && [ "$data_commit" = "$pd" ] && [ "$server_commit" = "$ps" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "上游未变（server=$server_commit data=$data_commit），跳过"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+# PLACEHOLDER
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      SERVER_COMMIT: ${{ needs.check.outputs.server_commit }}
+      DATA_COMMIT: ${{ needs.check.outputs.data_commit }}
+      R2_BUCKET: tianjg-update
+      R2_PREFIX: StellaSora
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
+    steps:
+      - name: 版本号
+        run: echo "VERSION=v$(TZ=Asia/Shanghai date +%Y.%m.%d-%H.%M)-$(echo "$SERVER_COMMIT" | cut -c1-7)" >> "$GITHUB_ENV"
+
+      - name: 检出服务端源码
+        uses: actions/checkout@v4
+        with:
+          repository: AzureXuanVerse/Nebula-P
+          token: ${{ secrets.GH_PAT }}
+          path: nebula
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: 构建 Jar
+        working-directory: nebula
+        run: |
+          chmod +x ./gradlew
+          ./gradlew jar
+          test -f Nebula.jar || { echo "::error::Nebula.jar 构建失败"; exit 1; }
+
+      - name: 拼资源包 + 打包
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "$DATA_REPO" stella-data
+          mkdir -p Resources/bin Resources/language/zh_CN Resources/language/en_US Resources/language/ja_JP Resources/language/ko_KR Resources/language/zh_TW
+          cp stella-data/CN/bin/*.json Resources/bin/ 2>/dev/null || true
+          cp stella-data/CN/language/zh_CN/*.json Resources/language/zh_CN/ 2>/dev/null || true
+          cp stella-data/CN/language/Language.zh_CN.json Resources/language/ 2>/dev/null || true
+          cp stella-data/EN/language/en_US/*.json Resources/language/en_US/ 2>/dev/null || true
+          cp stella-data/JP/language/ja_JP/*.json Resources/language/ja_JP/ 2>/dev/null || true
+          cp stella-data/KR/language/ko_KR/*.json Resources/language/ko_KR/ 2>/dev/null || true
+          cp stella-data/TW/language/zh_TW/*.json Resources/language/zh_TW/ 2>/dev/null || true
+          mkdir -p release-packages
+          zip -r "release-packages/Resources-${VERSION}.zip" Resources
+          cp nebula/Nebula.jar "release-packages/Nebula-${VERSION}.jar"
+          rm -rf stella-data Resources
+          ls -al release-packages/
+
+# PLACEHOLDER2
+
+      - name: 发布到 Depot Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="stellasora-${VERSION}"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$TAG" \
+            "release-packages/Nebula-${VERSION}.jar" \
+            "release-packages/Resources-${VERSION}.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "StellaSora ${VERSION}" \
+            --notes "Nebula@${SERVER_COMMIT} data@${DATA_COMMIT}"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName \
+            --jq '.[].tagName | select(startswith("stellasora-"))' \
+            | while read -r t; do
+                if [ -n "$t" ] && [ "$t" != "$TAG" ]; then gh release delete "$t" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes; fi
+              done
+
+      - name: 上传 R2 + 索引
+        run: |
+          set -euo pipefail
+          base="s3://${R2_BUCKET}/${R2_PREFIX}"
+          jar="Nebula-${VERSION}.jar"; zip="Resources-${VERSION}.zip"; tag="stellasora-${VERSION}"; ver="${VERSION#v}"
+          jsize=$(stat -c %s "release-packages/$jar"); jsha=$(sha256sum "release-packages/$jar" | cut -d' ' -f1)
+          zsize=$(stat -c %s "release-packages/$zip"); zsha=$(sha256sum "release-packages/$zip" | cut -d' ' -f1)
+          aws s3 cp "release-packages/$jar" "$base/$jar" --endpoint-url "$R2_ENDPOINT" --content-type application/java-archive --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp "release-packages/$zip" "$base/$zip" --endpoint-url "$R2_ENDPOINT" --content-type application/zip --cache-control "public, max-age=31536000, immutable"
+          printf '{"version":"%s","tag":"%s","archive":"%s","size":%s,"sha256":"%s","server_commit":"%s","data_commit":"%s"}\n' \
+            "$ver" "$tag" "$jar" "$jsize" "$jsha" "$SERVER_COMMIT" "$DATA_COMMIT" > server.json
+          printf '{"version":"%s","tag":"%s","archive":"%s","size":%s,"sha256":"%s","server_commit":"%s","data_commit":"%s"}\n' \
+            "$ver" "$tag" "$zip" "$zsize" "$zsha" "$SERVER_COMMIT" "$DATA_COMMIT" > latest.json
+          aws s3 cp server.json "$base/server.json" --endpoint-url "$R2_ENDPOINT" --content-type application/json --cache-control "no-cache, max-age=30"
+          aws s3 cp latest.json "$base/latest.json" --endpoint-url "$R2_ENDPOINT" --content-type application/json --cache-control "no-cache, max-age=30"
+          aws s3 rm "$base/" --recursive --endpoint-url "$R2_ENDPOINT" --exclude "*" --include "Nebula-*.jar" --exclude "$jar"
+          aws s3 rm "$base/" --recursive --endpoint-url "$R2_ENDPOINT" --exclude "*" --include "Resources-*.zip" --exclude "$zip"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 取蓝奏云 API 库
+        uses: actions/checkout@v4
+        with:
+          repository: AzureXuanVerse/LanZouCloud-API
+          token: ${{ secrets.GH_PAT }}
+          path: lanzou-api-repo
+      - name: 上传蓝奏云
+        env:
+          LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
+          LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
+          PROJECT_NAME: Nebula
+        run: |
+          python -m pip install --quiet --upgrade pip
+          pip install --quiet requests requests_toolbelt aiohttp asyncio
+          SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+          cp -r lanzou-api-repo/lanzou_windfollowingheart "$SITE/"
+          cp lanzou-api-repo/lanzou_upload_workflow.py .
+          python lanzou_upload_workflow.py
+
+  cleanup:
+    needs: [check, build]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: 只保留最新 1 条运行记录
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow build-stellasora.yml \
+            --limit 200 --json databaseId,status \
+            --jq '[.[] | select(.status=="completed")] | .[1:][].databaseId' \
+            | while read -r id; do
+                if [ -n "$id" ]; then gh run delete "$id" --repo "$GITHUB_REPOSITORY" || true; fi
+              done
