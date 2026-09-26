@@ -1,0 +1,148 @@
+name: Build Arknights Resources
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 强制重建发布（即使上游未变）
+        type: boolean
+        default: false
+  schedule:
+    - cron: '37 21,9 * * *'
+
+concurrency:
+  group: build-arknights
+  cancel-in-progress: false
+
+env:
+  AK_DATA_REPO: https://github.com/Kengxxiao/ArknightsGameData.git
+  SERVER_REPO: https://github.com/pfyy/OpenBachelorS.git
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.c.outputs.build }}
+      data_commit: ${{ steps.c.outputs.data_commit }}
+      server_commit: ${{ steps.c.outputs.server_commit }}
+    steps:
+      - id: c
+        run: |
+          data_commit=$(git ls-remote "$AK_DATA_REPO" HEAD | cut -f1)
+          server_commit=$(git ls-remote "$SERVER_REPO" HEAD | cut -f1)
+          echo "data_commit=$data_commit" >> "$GITHUB_OUTPUT"
+          echo "server_commit=$server_commit" >> "$GITHUB_OUTPUT"
+          prev=$(curl -fsSL "https://upd.tianjg.com/Arknights/latest.json?t=$RANDOM" || echo '{}')
+          pd=$(echo "$prev" | grep -o '"data_commit":"[^"]*"' | cut -d'"' -f4)
+          ps=$(echo "$prev" | grep -o '"server_commit":"[^"]*"' | cut -d'"' -f4)
+          if [ "${{ inputs.force }}" != "true" ] && [ -n "$data_commit" ] && [ "$data_commit" = "$pd" ] && [ "$server_commit" = "$ps" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "上游未变（data=$data_commit server=$server_commit），跳过"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      DATA_COMMIT: ${{ needs.check.outputs.data_commit }}
+      SERVER_COMMIT: ${{ needs.check.outputs.server_commit }}
+      R2_BUCKET: tianjg-update
+      R2_PREFIX: Arknights
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
+    steps:
+      - name: 版本号
+        run: echo "VERSION=v$(TZ=Asia/Shanghai date +%Y.%m.%d-%H.%M)-$(echo "$DATA_COMMIT" | cut -c1-7)" >> "$GITHUB_ENV"
+
+      - name: 检出服务端上游（生成 conf 用）
+        uses: actions/checkout@v4
+        with:
+          repository: pfyy/OpenBachelorS
+          path: server
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: snok/install-poetry@v1
+      - name: 生成 conf
+        working-directory: server
+        run: |
+          poetry install --no-interaction
+          poetry run version-updater && poetry run link-updater
+
+      - name: 取 res/excel（公开游戏数据）
+        uses: actions/checkout@v4
+        with:
+          repository: Kengxxiao/ArknightsGameData
+          path: akdata
+          sparse-checkout: zh_CN/gamedata/excel/
+
+      - name: 打包 Resources
+        run: |
+          set -euo pipefail
+          mkdir -p pkg/res release-packages
+          cp -r akdata/zh_CN/gamedata/excel pkg/res/excel
+          cp -r server/conf pkg/conf
+          rm -f pkg/conf/squad.json pkg/conf/config.json pkg/conf/assist.json
+          (cd pkg && zip -r "${GITHUB_WORKSPACE}/release-packages/Resources-${VERSION}.zip" res/excel conf)
+          ls -al release-packages/
+
+      - name: 发布到本仓库 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="arknights-${VERSION}"
+          gh release delete "$TAG" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$TAG" \
+            "release-packages/Resources-${VERSION}.zip#Resources-${VERSION}.zip" \
+            --title "Arknights ${VERSION}" \
+            --notes "res/excel@${DATA_COMMIT} conf@${SERVER_COMMIT}"
+          gh release list --limit 200 --json tagName \
+            --jq '.[].tagName | select(startswith("arknights-"))' \
+            | while read -r t; do
+                if [ -n "$t" ] && [ "$t" != "$TAG" ]; then gh release delete "$t" --cleanup-tag --yes; fi
+              done
+
+      - name: 上传 R2 + latest.json
+        run: |
+          set -euo pipefail
+          name="Resources-${VERSION}.zip"
+          size=$(stat -c %s "release-packages/${name}")
+          sha=$(sha256sum "release-packages/${name}" | cut -d' ' -f1)
+          base="s3://${R2_BUCKET}/${R2_PREFIX}"
+          aws s3 cp "release-packages/${name}" "${base}/${name}" --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/zip --cache-control "public, max-age=31536000, immutable"
+          printf '{"version":"%s","tag":"arknights-%s","archive":"%s","size":%s,"sha256":"%s","data_commit":"%s","server_commit":"%s"}\n' \
+            "$VERSION" "$VERSION" "$name" "$size" "$sha" "$DATA_COMMIT" "$SERVER_COMMIT" > latest.json
+          aws s3 cp latest.json "${base}/latest.json" --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/json --cache-control "no-cache, max-age=30"
+          aws s3 rm "${base}/" --recursive --endpoint-url "$R2_ENDPOINT" \
+            --exclude "*" --include "Resources-*.zip" --exclude "${name}"
+
+      - name: 上传蓝奏云
+        uses: actions/checkout@v4
+        with:
+          repository: AzureXuanVerse/LanZouCloud-API
+          token: ${{ secrets.GH_PAT }}
+          path: lanzou-api-repo
+      - name: 蓝奏云上传
+        env:
+          LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
+          LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
+          PROJECT_NAME: Arknights
+        run: |
+          python -m pip install --quiet --upgrade pip
+          pip install --quiet requests requests_toolbelt aiohttp asyncio
+          SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+          cp -r lanzou-api-repo/lanzou_windfollowingheart "$SITE/"
+          cp lanzou-api-repo/lanzou_upload_workflow.py .
+          python lanzou_upload_workflow.py
