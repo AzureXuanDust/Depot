@@ -147,3 +147,22 @@ jobs:
           cp -r lanzou-api-repo/lanzou_windfollowingheart "$SITE/"
           cp lanzou-api-repo/lanzou_upload_workflow.py .
           python lanzou_upload_workflow.py
+
+  cleanup:
+    needs: [check, build]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: 只保留最新 1 条运行记录
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 删掉除最新一条（已完成）之外的所有本工作流运行记录；进行中的当前这条不动
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow build-arknights.yml \
+            --limit 200 --json databaseId,status \
+            --jq '[.[] | select(.status=="completed")] | .[1:][].databaseId' \
+            | while read -r id; do
+                if [ -n "$id" ]; then gh run delete "$id" --repo "$GITHUB_REPOSITORY" || true; fi
+              done
