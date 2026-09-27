@@ -82,16 +82,22 @@ jobs:
           key: ${{ runner.os }}-nuget-${{ hashFiles('server/EpinelPS/EpinelPS.csproj', 'server/EpinelPS.Analyzers/EpinelPS.Analyzers.csproj') }}
           restore-keys: |
             ${{ runner.os }}-nuget-
-      - name: 恢复服务端依赖
+      - name: 构建 Windows x64 服务端
         working-directory: server
-        run: dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64
-      - name: 发布 Windows x64 服务端
-        working-directory: server
-        run: >-
-          dotnet publish EpinelPS/EpinelPS.csproj
-          --configuration Release --runtime win-x64 --self-contained true
-          --no-restore -p:PublishSingleFile=true
-          --output ./bin/publish/epinelps-windows
+        run: |
+          echo "=== 诊断 A：单独还原生成器项目（不带主项目的 RID/图）==="
+          if dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj --runtime win-x64 >/dev/null 2>&1; then
+            echo "A：生成器单独还原 OK —— 说明失败来自主项目图把 RID/SelfContained/SingleFile 下传进生成器"
+          else
+            echo "A：生成器单独还原也 FAIL —— 问题在生成器项目本身"
+          fi
+          echo "=== 给生成器 ProjectReference 加 UndefineProperties，阻止这些属性下传（生成器与 RID 无关）==="
+          sed -i 's#ReferenceOutputAssembly="false"#ReferenceOutputAssembly="false" UndefineProperties="RuntimeIdentifier;RuntimeIdentifiers;SelfContained;PublishSingleFile"#' EpinelPS/EpinelPS.csproj
+          grep -n "EpinelPS.Analyzers.csproj" EpinelPS/EpinelPS.csproj
+          dotnet publish EpinelPS/EpinelPS.csproj \
+            --configuration Release --runtime win-x64 --self-contained true \
+            -p:PublishSingleFile=true \
+            --output ./bin/publish/epinelps-windows
 
       - name: 打包
         run: |
