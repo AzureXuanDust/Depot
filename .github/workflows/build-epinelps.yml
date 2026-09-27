@@ -73,17 +73,17 @@ jobs:
           dotnet-version: '10.0.400'
       - name: 构建 Windows x64 服务端
         working-directory: server
+        env:
+          NUGET_SHOW_STACK: 'true'
         run: |
-          # 真相：runner 预装了 android/maui 等 workload，还原项目图时 workload 解析器会让
-          # netstandard2.0 的 Roslyn 分析器子项目（EpinelPS.Analyzers）还原 MSB4181 静默失败
-          # （"RestoreTask returned false but did not log an error"）；本机没装 workload 所以正常。
-          # 本项目是 net10.0、用不到任何 workload，直接关掉 workload 解析器即可。SDK 钉 10.0.400。
           printf '{"sdk":{"version":"10.0.400","rollForward":"disable"}}\n' > global.json
           dotnet --version
+          echo "=== 诊断：图还原 + 串行 + NUGET_SHOW_STACK，逼出被 MSB4181 吞掉的真实错误（看下面 tail）==="
+          dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64 -p:RestoreDisableParallel=true -v normal 2>&1 | tail -80 || true
+          echo "=== 正式构建 ==="
           dotnet publish EpinelPS/EpinelPS.csproj \
             --configuration Release --runtime win-x64 --self-contained true \
             -p:PublishSingleFile=true \
-            -p:MSBuildEnableWorkloadResolver=false \
             --output ./bin/publish/epinelps-windows
 
       - name: 打包
