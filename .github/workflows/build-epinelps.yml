@@ -85,15 +85,17 @@ jobs:
       - name: 构建 Windows x64 服务端
         working-directory: server
         run: |
-          # 钉到本机能跑通的 10.0.400（runner 默认给 10.0.401，可能是它的回归）
+          # 1) 钉 10.0.400：生成器 EpinelPS.Analyzers 在 runner 默认的 10.0.401 上单独还原就挂
+          #    （本机 10.0.400 正常，判定为 401 回归）。
           printf '{"sdk":{"version":"10.0.400","rollForward":"disable"}}\n' > global.json
           dotnet --version
-          echo "=== 生成器 csproj 实际内容（排查 clone 差异）==="
-          cat EpinelPS.Analyzers/EpinelPS.Analyzers.csproj
-          echo "=== 1) 不带 RID 还原生成器 ==="
-          if dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj 2>&1 | tail -15; then echo "无RID: 命令返回0"; else echo "无RID: 命令非0"; fi
-          echo "=== 2) 带 win-x64 RID 还原生成器（detailed，看末尾真实错误）==="
-          dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj --runtime win-x64 -v detailed 2>&1 | tail -60
+          # 2) publish 主项目时 RID/SelfContained/PublishSingleFile 会顺 ProjectReference 下传进
+          #    netstandard2.0 生成器，让图还原挂；UndefineProperties 阻断下传（生成器与 RID 无关）。
+          sed -i 's#ReferenceOutputAssembly="false"#ReferenceOutputAssembly="false" UndefineProperties="RuntimeIdentifier;RuntimeIdentifiers;SelfContained;PublishSingleFile"#' EpinelPS/EpinelPS.csproj
+          dotnet publish EpinelPS/EpinelPS.csproj \
+            --configuration Release --runtime win-x64 --self-contained true \
+            -p:PublishSingleFile=true \
+            --output ./bin/publish/epinelps-windows
 
       - name: 打包
         run: |
