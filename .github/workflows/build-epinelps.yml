@@ -1,0 +1,171 @@
+name: Build EpinelPS
+
+# 用诊断验证过能在 Depot 跑通的配方（checkout@v7 + setup-dotnet@v6 + cache@v6 +
+# NUGET_PACKAGES=workspace + `dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64`）。
+# 之前 build-epinelps 用 @v4 会踩 NuGet 静默还原坑（跨仓库检出无辜，是 action 版本的锅）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 强制重建发布（即使上游未变）
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-epinelps
+  cancel-in-progress: false
+
+env:
+  SERVER_REPO: AzureXuanVerse/EpinelPS-P
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+  NUGET_XMLDOC_MODE: skip
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.c.outputs.build }}
+      server_commit: ${{ steps.c.outputs.server_commit }}
+    steps:
+      - id: c
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          server_commit=$(git ls-remote "https://x-access-token:${GH_PAT}@github.com/${SERVER_REPO}.git" HEAD | cut -f1)
+          echo "server_commit=$server_commit" >> "$GITHUB_OUTPUT"
+          prev=$(curl -fsSL "https://upd.tianjg.com/EpinelPS/latest.json?t=$RANDOM" || echo '{}')
+          ps=$(echo "$prev" | grep -o '"server_commit":"[^"]*"' | cut -d'"' -f4)
+          if [ "${{ inputs.force }}" != "true" ] && [ -n "$server_commit" ] && [ "$server_commit" = "$ps" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "上游未变（server=$server_commit），跳过"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+# PLACEHOLDER
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SERVER_COMMIT: ${{ needs.check.outputs.server_commit }}
+      R2_BUCKET: tianjg-update
+      R2_PREFIX: EpinelPS
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
+    steps:
+      - name: 版本号
+        run: echo "VERSION=v$(TZ=Asia/Shanghai date +%Y.%m.%d-%H.%M)-$(echo "$SERVER_COMMIT" | cut -c1-7)" >> "$GITHUB_ENV"
+
+      - name: 检出服务端源码（私库，放工作区根）
+        uses: actions/checkout@v7
+        with:
+          repository: AzureXuanVerse/EpinelPS-P
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: 缓存 NuGet 包
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: ${{ runner.os }}-nuget-${{ hashFiles('EpinelPS/EpinelPS.csproj', 'EpinelPS.Analyzers/EpinelPS.Analyzers.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+      - name: 恢复服务端依赖
+        run: dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64
+      - name: 发布 Windows x64 服务端
+        run: >-
+          dotnet publish EpinelPS/EpinelPS.csproj
+          --configuration Release --runtime win-x64 --self-contained true
+          --no-restore -p:PublishSingleFile=true
+          --output ./bin/publish/epinelps-windows
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          mkdir -p release-packages
+          tar -czf "release-packages/EpinelPS-${VERSION}-windows-x86_64.tar.gz" -C bin/publish/epinelps-windows .
+          ls -lh release-packages/
+
+      - name: 发布到 Depot Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="epinelps-${VERSION}"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$TAG" release-packages/*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --title "EpinelPS ${VERSION}" --notes "EpinelPS@${SERVER_COMMIT}"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName \
+            --jq '.[].tagName | select(startswith("epinelps-"))' \
+            | while read -r t; do
+                if [ -n "$t" ] && [ "$t" != "$TAG" ]; then gh release delete "$t" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes; fi
+              done
+
+      - name: 上传 R2 + 索引
+        run: |
+          set -euo pipefail
+          base="s3://${R2_BUCKET}/${R2_PREFIX}"
+          name="EpinelPS-${VERSION}-windows-x86_64.tar.gz"; tag="epinelps-${VERSION}"; ver="${VERSION#v}"
+          size=$(stat -c %s "release-packages/$name"); sha=$(sha256sum "release-packages/$name" | cut -d' ' -f1)
+          aws s3 cp "release-packages/$name" "$base/$name" --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/gzip --cache-control "public, max-age=31536000, immutable"
+          printf '{"version":"%s","tag":"%s","archive":"%s","size":%s,"sha256":"%s","server_commit":"%s"}\n' \
+            "$ver" "$tag" "$name" "$size" "$sha" "$SERVER_COMMIT" > latest.json
+          aws s3 cp latest.json "$base/latest.json" --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/json --cache-control "no-cache, max-age=30"
+          aws s3 rm "$base/" --recursive --endpoint-url "$R2_ENDPOINT" --exclude "*" --include "EpinelPS-*.tar.gz" --exclude "$name"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 取蓝奏云 API 库
+        uses: actions/checkout@v4
+        with:
+          repository: AzureXuanVerse/LanZouCloud-API
+          token: ${{ secrets.GH_PAT }}
+          path: lanzou-api-repo
+      - name: 上传蓝奏云
+        env:
+          LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
+          LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
+          PROJECT_NAME: EpinelPS
+        run: |
+          python -m pip install --quiet --upgrade pip
+          pip install --quiet requests requests_toolbelt aiohttp asyncio
+          SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+          cp -r lanzou-api-repo/lanzou_windfollowingheart "$SITE/"
+          cp lanzou-api-repo/lanzou_upload_workflow.py .
+          python lanzou_upload_workflow.py
+
+  cleanup:
+    needs: [check, build]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: 只保留最新 1 条运行记录
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow build-epinelps.yml \
+            --limit 200 --json databaseId,status \
+            --jq '[.[] | select(.status=="completed")] | .[1:][].databaseId' \
+            | while read -r id; do
+                if [ -n "$id" ]; then gh run delete "$id" --repo "$GITHUB_REPOSITORY" || true; fi
+              done
+
