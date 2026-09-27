@@ -82,25 +82,24 @@ jobs:
           key: ${{ runner.os }}-nuget-${{ hashFiles('server/EpinelPS/EpinelPS.csproj', 'server/EpinelPS.Analyzers/EpinelPS.Analyzers.csproj') }}
           restore-keys: |
             ${{ runner.os }}-nuget-
-      - name: 构建 Windows x64 服务端
+      - name: 诊断 - 生成器还原（binlog + diag 全量落文件）
         working-directory: server
         run: |
           set +e
-          echo "用 runner 默认 SDK（与其 workload 同 band，不钉版本）"
           dotnet --version
-          echo "### T1: 关 workload 解析器 + 带 win-x64 RID ###"
-          rm -rf EpinelPS.Analyzers/obj
-          MSBuildEnableWorkloadResolver=false dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj --runtime win-x64 >/tmp/t1.log 2>&1; echo "T1 exit=$?"; tail -4 /tmp/t1.log
-          echo "### T2: 原样 + 带 win-x64 RID（对照）###"
-          rm -rf EpinelPS.Analyzers/obj
-          dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj --runtime win-x64 >/tmp/t2.log 2>&1; echo "T2 exit=$?"; tail -4 /tmp/t2.log
-          echo "### T3: 不带 RID ###"
-          rm -rf EpinelPS.Analyzers/obj
-          dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj >/tmp/t3.log 2>&1; echo "T3 exit=$?"; tail -4 /tmp/t3.log
-          echo "### T4: 关 workload 解析器 + 不带 RID ###"
-          rm -rf EpinelPS.Analyzers/obj
-          MSBuildEnableWorkloadResolver=false dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj >/tmp/t4.log 2>&1; echo "T4 exit=$?"; tail -4 /tmp/t4.log
-          echo "=== 诊断结束 ==="
+          dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj \
+            -bl:"$GITHUB_WORKSPACE/restore.binlog" -v diagnostic > "$GITHUB_WORKSPACE/gen.log" 2>&1
+          echo "还原退出码: $?"
+          echo "--- gen.log 最后 90 行 ---"
+          tail -90 "$GITHUB_WORKSPACE/gen.log"
+      - name: 上传诊断产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: epinelps-restore-diag
+          path: |
+            restore.binlog
+            gen.log
 
       - name: 打包
         run: |
