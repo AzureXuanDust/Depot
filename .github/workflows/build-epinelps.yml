@@ -22,6 +22,7 @@ env:
 jobs:
   check:
     runs-on: ubuntu-24.04
+
     outputs:
       build: ${{ steps.c.outputs.build }}
       server_commit: ${{ steps.c.outputs.server_commit }}
@@ -68,7 +69,7 @@ jobs:
     steps:
       - name: 版本号
         run: |
-          echo "VERSION=v$(TZ=Asia/Shanghai date +%Y.%m.%d-%H.%M)-$(echo "$SERVER_COMMIT" | cut -c1-7)" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=v$(TZ=Asia/Shanghai date +%Y.%m.%d-%H.%M)-$(echo "$SERVER_COMMIT" | cut -c1-7)" >> "$GITHUB_ENV"
 
       - name: 检出服务端源码（私库，放工作区根）
         uses: actions/checkout@v7
@@ -83,20 +84,10 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # Analyzer 是 netstandard2.0 Roslyn Source Generator。
-      # 先单独恢复它，不传 win-x64 RID。
-      # diagnostic 用于在失败时输出完整 NuGet/MSBuild 诊断信息。
-      - name: 恢复 Analyzer 依赖
-        run: |
-          dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj \
-            --verbosity diagnostic
-
-      # Analyzer 已经完成 restore 后，再恢复主项目及 Windows x64 Runtime。
       - name: 恢复服务端依赖
         run: |
           dotnet restore EpinelPS/EpinelPS.csproj \
-            --runtime win-x64 \
-            --verbosity normal
+            --runtime win-x64
 
       - name: 发布 Windows x64 服务端
         run: >-
@@ -114,7 +105,7 @@ jobs:
 
           mkdir -p release-packages
 
-          tar -czf "release-packages/EpinelPS-${VERSION}-windows-x86_64.tar.gz" \
+          tar -czf "release-packages/EpinelPS-${RELEASE_VERSION}-windows-x86_64.tar.gz" \
             -C bin/publish/epinelps-windows .
 
           ls -lh release-packages/
@@ -125,7 +116,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          TAG="epinelps-${VERSION}"
+          TAG="epinelps-${RELEASE_VERSION}"
 
           gh release delete "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
@@ -135,7 +126,7 @@ jobs:
           gh release create "$TAG" \
             release-packages/*.tar.gz \
             --repo "$GITHUB_REPOSITORY" \
-            --title "EpinelPS ${VERSION}" \
+            --title "EpinelPS ${RELEASE_VERSION}" \
             --notes "EpinelPS@${SERVER_COMMIT}"
 
           gh release list \
@@ -157,9 +148,9 @@ jobs:
           set -euo pipefail
 
           base="s3://${R2_BUCKET}/${R2_PREFIX}"
-          name="EpinelPS-${VERSION}-windows-x86_64.tar.gz"
-          tag="epinelps-${VERSION}"
-          ver="${VERSION#v}"
+          name="EpinelPS-${RELEASE_VERSION}-windows-x86_64.tar.gz"
+          tag="epinelps-${RELEASE_VERSION}"
+          ver="${RELEASE_VERSION#v}"
 
           size=$(stat -c %s "release-packages/$name")
           sha=$(sha256sum "release-packages/$name" | cut -d' ' -f1)
