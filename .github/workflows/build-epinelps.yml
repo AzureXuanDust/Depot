@@ -74,10 +74,12 @@ jobs:
       - name: 构建 Windows x64 服务端
         working-directory: server
         run: |
-          dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64
+          # 不单独 dotnet restore --runtime：那会把 win-x64 RID 硬套到 netstandard2.0 分析器项目
+          # （EpinelPS.Analyzers）上，新版 SDK 会让 RestoreTask 静默返回 false（MSB4181）。
+          # 直接 publish 隐式还原即可（self-contained 单文件的标准写法）。
           dotnet publish EpinelPS/EpinelPS.csproj \
             --configuration Release --runtime win-x64 --self-contained true \
-            --no-restore -p:PublishSingleFile=true \
+            -p:PublishSingleFile=true \
             --output ./bin/publish/epinelps-windows
 
       - name: 打包
