@@ -45,10 +45,7 @@ jobs:
   build:
     needs: check
     if: needs.check.outputs.build == 'true'
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: bash
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
@@ -77,13 +74,16 @@ jobs:
       - name: 构建 Windows x64 服务端
         working-directory: server
         run: |
-          # 在 Windows runner 上原生构建 win-x64（和本地一致）：Linux 主机还原 Roslyn 分析器项目
-          # 会 MSB4181 静默失败，Windows 主机正常。SDK 钉到本地验证过的 10.0.400。
+          # 真相：runner 预装了 android/maui 等 workload，还原项目图时 workload 解析器会让
+          # netstandard2.0 的 Roslyn 分析器子项目（EpinelPS.Analyzers）还原 MSB4181 静默失败
+          # （"RestoreTask returned false but did not log an error"）；本机没装 workload 所以正常。
+          # 本项目是 net10.0、用不到任何 workload，直接关掉 workload 解析器即可。SDK 钉 10.0.400。
           printf '{"sdk":{"version":"10.0.400","rollForward":"disable"}}\n' > global.json
           dotnet --version
           dotnet publish EpinelPS/EpinelPS.csproj \
             --configuration Release --runtime win-x64 --self-contained true \
             -p:PublishSingleFile=true \
+            -p:MSBuildEnableWorkloadResolver=false \
             --output ./bin/publish/epinelps-windows
 
       - name: 打包
@@ -141,8 +141,8 @@ jobs:
         run: |
           python -m pip install --quiet --upgrade pip
           pip install --quiet requests requests_toolbelt aiohttp asyncio
-          # 用 python 拷贝，避开 Windows 上 site-packages 路径带反斜杠在 bash 里被吞的问题
-          python -c "import site,shutil,os; shutil.copytree('lanzou-api-repo/lanzou_windfollowingheart', os.path.join(site.getsitepackages()[0],'lanzou_windfollowingheart'), dirs_exist_ok=True)"
+          SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+          cp -r lanzou-api-repo/lanzou_windfollowingheart "$SITE/"
           cp lanzou-api-repo/lanzou_upload_workflow.py .
           python lanzou_upload_workflow.py
 
