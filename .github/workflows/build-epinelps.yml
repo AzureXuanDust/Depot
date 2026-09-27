@@ -70,17 +70,17 @@ jobs:
           path: server
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '10.0.400'
       - name: 构建 Windows x64 服务端
         working-directory: server
         run: |
-          # RestoreUseStaticGraphEvaluation=false：新版 SDK 默认开静态图还原，它会在
-          # Roslyn 分析器项目（EpinelPS.Analyzers，netstandard2.0）上静默失败（MSB4181，
-          # "RestoreTask returned false but did not log an error"）。关掉它回到经典还原即可。
+          # runner 默认的 10.0.401 SDK 在还原 Roslyn 分析器项目（EpinelPS.Analyzers）时
+          # 会 MSB4181 静默失败；本地 10.0.400 正常。用 global.json 钉住 setup-dotnet 装的 10.0.400。
+          printf '{"sdk":{"version":"10.0.400","rollForward":"disable"}}\n' > global.json
+          dotnet --version
           dotnet publish EpinelPS/EpinelPS.csproj \
             --configuration Release --runtime win-x64 --self-contained true \
             -p:PublishSingleFile=true \
-            -p:RestoreUseStaticGraphEvaluation=false \
             --output ./bin/publish/epinelps-windows
 
       - name: 打包
