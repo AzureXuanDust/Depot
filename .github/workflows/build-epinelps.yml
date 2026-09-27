@@ -82,24 +82,20 @@ jobs:
           key: ${{ runner.os }}-nuget-${{ hashFiles('server/EpinelPS/EpinelPS.csproj', 'server/EpinelPS.Analyzers/EpinelPS.Analyzers.csproj') }}
           restore-keys: |
             ${{ runner.os }}-nuget-
-      - name: 诊断 - 生成器还原（binlog + diag 全量落文件）
+      - name: 构建 Windows x64 服务端
         working-directory: server
         run: |
           set +e
-          dotnet --version
-          dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj \
-            -bl:"$GITHUB_WORKSPACE/restore.binlog" -v diagnostic > "$GITHUB_WORKSPACE/gen.log" 2>&1
-          echo "还原退出码: $?"
-          echo "--- gen.log 最后 90 行 ---"
-          tail -90 "$GITHUB_WORKSPACE/gen.log"
-      - name: 上传诊断产物
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: epinelps-restore-diag
-          path: |
-            restore.binlog
-            gen.log
+          echo "### 诊断：NuGetAudit=false 单独还原生成器（binlog 显示 restore 唯一异常项就是 NuGetAudit）###"
+          rm -rf EpinelPS.Analyzers/obj
+          dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj -p:NuGetAudit=false > /tmp/a.log 2>&1
+          echo "audit=false 单独还原退出码=$?"; tail -4 /tmp/a.log
+          echo "### 正式 publish（关 NuGetAudit）###"
+          set -e
+          dotnet publish EpinelPS/EpinelPS.csproj \
+            --configuration Release --runtime win-x64 --self-contained true \
+            -p:PublishSingleFile=true -p:NuGetAudit=false \
+            --output ./bin/publish/epinelps-windows
 
       - name: 打包
         run: |
