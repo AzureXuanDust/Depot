@@ -73,14 +73,14 @@ jobs:
           dotnet-version: '10.0.400'
       - name: 构建 Windows x64 服务端
         working-directory: server
-        env:
-          NUGET_SHOW_STACK: 'true'
         run: |
           printf '{"sdk":{"version":"10.0.400","rollForward":"disable"}}\n' > global.json
-          dotnet --version
-          echo "=== 诊断：图还原 + 串行 + NUGET_SHOW_STACK，逼出被 MSB4181 吞掉的真实错误（看下面 tail）==="
-          dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64 -p:RestoreDisableParallel=true -v normal 2>&1 | tail -80 || true
-          echo "=== 正式构建 ==="
+          # EpinelPS.Analyzers 是必须的源生成器（netstandard2.0，生成 GameDataInitializer.g.cs）。
+          # 发布主项目时 RID/SelfContained/PublishSingleFile 会顺着 ProjectReference 下传进生成器项目，
+          # 在 runner 上让它的还原 MSB4181 静默失败（本机无 workload/环境不同，复现不了）。
+          # 给该引用加 UndefineProperties 阻止这些属性下传（生成器与 RID 无关）——这类问题的标准修法。
+          sed -i 's#ReferenceOutputAssembly="false"#ReferenceOutputAssembly="false" UndefineProperties="RuntimeIdentifier;RuntimeIdentifiers;SelfContained;PublishSingleFile"#' EpinelPS/EpinelPS.csproj
+          grep -n "EpinelPS.Analyzers.csproj" EpinelPS/EpinelPS.csproj
           dotnet publish EpinelPS/EpinelPS.csproj \
             --configuration Release --runtime win-x64 --self-contained true \
             -p:PublishSingleFile=true \
