@@ -1,4 +1,4 @@
-name: DIAG EpinelPS restore
+name: DIAG EpinelPS Cold Restore
 
 on:
   workflow_dispatch:
@@ -14,97 +14,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 检出私库
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           repository: AzureXuanVerse/EpinelPS-P
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 0
 
-      - name: 安装 .NET SDK
-        uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
-      - name: 环境信息
-        shell: bash
+      - name: 保证完全冷环境
         run: |
-          echo "===== Commit ====="
+          rm -rf "$NUGET_PACKAGES"
+          rm -rf EpinelPS/obj
+          rm -rf EpinelPS.Analyzers/obj
+
+          echo "SDK:"
+          dotnet --version
+
+          echo "Commit:"
           git rev-parse HEAD
 
-          echo
-          echo "===== .NET ====="
-          dotnet --version
-          dotnet --info
-
-          echo
-          echo "===== Analyzer csproj ====="
-          cat EpinelPS.Analyzers/EpinelPS.Analyzers.csproj
-
-          echo
-          echo "===== NuGet.Config ====="
-          find . -iname 'nuget.config' -print -exec cat {} \; || true
-
-          echo
-          echo "===== Directory.Build.* ====="
-          find . \( -iname 'Directory.Build.props' -o -iname 'Directory.Build.targets' \) \
-            -print -exec cat {} \; || true
-
-      - name: A/B Restore
-        shell: bash
+      - name: 唯一一次 Restore
         run: |
-          set +e
-
-          run_test() {
-            name="$1"
-            shift
-
-            echo
-            echo "=================================================="
-            echo "$name"
-            echo "=================================================="
-
-            "$@"
-            rc=$?
-
-            echo
-            echo "EXIT CODE = $rc"
-            echo
-
-            return 0
-          }
-
-          run_test \
-            "TEST 1 - Analyzer 普通 restore" \
-            dotnet restore \
-              EpinelPS.Analyzers/EpinelPS.Analyzers.csproj \
-              --no-cache \
-              -v normal
-
-          run_test \
-            "TEST 2 - Analyzer + win-x64" \
-            dotnet restore \
-              EpinelPS.Analyzers/EpinelPS.Analyzers.csproj \
-              --runtime win-x64 \
-              --no-cache \
-              -v normal
-
-          run_test \
-            "TEST 3 - Server 普通 restore" \
-            dotnet restore \
-              EpinelPS/EpinelPS.csproj \
-              --no-cache \
-              -v normal
-
-          run_test \
-            "TEST 4 - Server + win-x64" \
-            dotnet restore \
-              EpinelPS/EpinelPS.csproj \
-              --runtime win-x64 \
-              --no-cache \
-              -v normal
-
-          echo
-          echo "=================================================="
-          echo "诊断结束"
-          echo "=================================================="
+          dotnet restore EpinelPS/EpinelPS.csproj \
+            --runtime win-x64 \
+            -v normal
