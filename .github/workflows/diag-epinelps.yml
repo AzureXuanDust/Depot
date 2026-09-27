@@ -1,0 +1,49 @@
+name: DIAG EpinelPS restore
+
+# 一次性对照实验：把 EpinelPS-P 的 release.yml 构建前半段（checkout@v7 + setup-dotnet@v6 + cache@v6 +
+# NUGET_PACKAGES=workspace + 同一条 restore）原样搬到 Depot，唯一变量 = 「用 GH_PAT 跨仓库检出私库」。
+# 若这里也挂 → 坐实是「跨仓库检出到 Depot」这个上下文；若这里成 → 之前 Depot 失败是别的差异（已改掉）。
+# 验证完即可删除本工作流。
+
+on:
+  workflow_dispatch:
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+  NUGET_XMLDOC_MODE: skip
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出私库（跨仓库 + GH_PAT，唯一变量）
+        uses: actions/checkout@v7
+        with:
+          repository: AzureXuanVerse/EpinelPS-P
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: 缓存 NuGet 包
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: ${{ runner.os }}-nuget-${{ hashFiles('EpinelPS/EpinelPS.csproj', 'EpinelPS.Analyzers/EpinelPS.Analyzers.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+      - name: 还原（和 EpinelPS-P release.yml 完全相同的命令）
+        shell: bash
+        run: |
+          set +e
+          dotnet --version
+          dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64 -v detailed > /tmp/r.log 2>&1
+          echo "=========== restore 退出码: $? ==========="
+          echo "--- 错误/超时/重试相关行 ---"
+          grep -niE "error|failed|timed out|timeout|retry|retrying|unable|could not|denied|forbidden|NU[0-9]{3,4}|exception|无法|失败" /tmp/r.log | grep -viE "NU1605|LogCode|WarningsAsErrors|NoWarn" | head -50
+          echo "--- 日志最后 50 行 ---"
+          tail -50 /tmp/r.log
+          echo "=========== 诊断结束（本步 exit 0 以便看全）==========="
