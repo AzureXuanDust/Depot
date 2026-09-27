@@ -17,6 +17,9 @@ env:
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
   NUGET_XMLDOC_MODE: skip
+  # 关键：用 workspace 内的干净包目录（照搬能跑通的旧工作流）。runner 默认的
+  # ~/.nuget/packages 预置了会和源生成器冲突的 Microsoft.CodeAnalysis.*，导致还原静默失败。
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
 
 jobs:
   check:
@@ -68,23 +71,27 @@ jobs:
           repository: AzureXuanVerse/EpinelPS-P
           token: ${{ secrets.GH_PAT }}
           path: server
-      - uses: actions/setup-dotnet@v4
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.400'
-      - name: 构建 Windows x64 服务端
+          dotnet-version: '10.0.x'
+      - name: 缓存 NuGet 包
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: ${{ runner.os }}-nuget-${{ hashFiles('server/EpinelPS/EpinelPS.csproj', 'server/EpinelPS.Analyzers/EpinelPS.Analyzers.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+      - name: 恢复服务端依赖
         working-directory: server
-        run: |
-          printf '{"sdk":{"version":"10.0.400","rollForward":"disable"}}\n' > global.json
-          # EpinelPS.Analyzers 是必须的源生成器（netstandard2.0，生成 GameDataInitializer.g.cs）。
-          # 发布主项目时 RID/SelfContained/PublishSingleFile 会顺着 ProjectReference 下传进生成器项目，
-          # 在 runner 上让它的还原 MSB4181 静默失败（本机无 workload/环境不同，复现不了）。
-          # 给该引用加 UndefineProperties 阻止这些属性下传（生成器与 RID 无关）——这类问题的标准修法。
-          sed -i 's#ReferenceOutputAssembly="false"#ReferenceOutputAssembly="false" UndefineProperties="RuntimeIdentifier;RuntimeIdentifiers;SelfContained;PublishSingleFile"#' EpinelPS/EpinelPS.csproj
-          grep -n "EpinelPS.Analyzers.csproj" EpinelPS/EpinelPS.csproj
-          dotnet publish EpinelPS/EpinelPS.csproj \
-            --configuration Release --runtime win-x64 --self-contained true \
-            -p:PublishSingleFile=true \
-            --output ./bin/publish/epinelps-windows
+        run: dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64
+      - name: 发布 Windows x64 服务端
+        working-directory: server
+        run: >-
+          dotnet publish EpinelPS/EpinelPS.csproj
+          --configuration Release --runtime win-x64 --self-contained true
+          --no-restore -p:PublishSingleFile=true
+          --output ./bin/publish/epinelps-windows
 
       - name: 打包
         run: |
