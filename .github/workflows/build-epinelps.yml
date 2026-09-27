@@ -65,18 +65,16 @@ jobs:
       - name: 版本号
         run: echo "VERSION=v$(TZ=Asia/Shanghai date +%Y.%m.%d-%H.%M)-$(echo "$SERVER_COMMIT" | cut -c1-7)" >> "$GITHUB_ENV"
 
-      - name: 检出服务端源码
+      - name: 检出服务端源码（放工作区根，和官方 CI 布局一致）
         uses: actions/checkout@v4
         with:
           repository: AzureXuanVerse/EpinelPS-P
           token: ${{ secrets.GH_PAT }}
-          path: server
       - name: 安装 .NET SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
       - name: 构建 Windows x64 服务端
-        working-directory: server
         run: |
           dotnet restore
           dotnet publish EpinelPS -c Release --output ./bin/publish/epinelps-windows
@@ -85,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-packages
-          tar -czf "release-packages/EpinelPS-${VERSION}-windows-x86_64.tar.gz" -C server/bin/publish/epinelps-windows .
+          tar -czf "release-packages/EpinelPS-${VERSION}-windows-x86_64.tar.gz" -C bin/publish/epinelps-windows .
           ls -lh release-packages/
 
       - name: 发布到 Depot Release
