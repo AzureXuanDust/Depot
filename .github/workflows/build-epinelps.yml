@@ -74,12 +74,13 @@ jobs:
       - name: 构建 Windows x64 服务端
         working-directory: server
         run: |
-          # 不单独 dotnet restore --runtime：那会把 win-x64 RID 硬套到 netstandard2.0 分析器项目
-          # （EpinelPS.Analyzers）上，新版 SDK 会让 RestoreTask 静默返回 false（MSB4181）。
-          # 直接 publish 隐式还原即可（self-contained 单文件的标准写法）。
+          # RestoreUseStaticGraphEvaluation=false：新版 SDK 默认开静态图还原，它会在
+          # Roslyn 分析器项目（EpinelPS.Analyzers，netstandard2.0）上静默失败（MSB4181，
+          # "RestoreTask returned false but did not log an error"）。关掉它回到经典还原即可。
           dotnet publish EpinelPS/EpinelPS.csproj \
             --configuration Release --runtime win-x64 --self-contained true \
             -p:PublishSingleFile=true \
+            -p:RestoreUseStaticGraphEvaluation=false \
             --output ./bin/publish/epinelps-windows
 
       - name: 打包
