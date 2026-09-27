@@ -83,8 +83,20 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # Analyzer 是 netstandard2.0 Roslyn Source Generator。
+      # 先单独恢复它，不传 win-x64 RID。
+      # diagnostic 用于在失败时输出完整 NuGet/MSBuild 诊断信息。
+      - name: 恢复 Analyzer 依赖
+        run: |
+          dotnet restore EpinelPS.Analyzers/EpinelPS.Analyzers.csproj \
+            --verbosity diagnostic
+
+      # Analyzer 已经完成 restore 后，再恢复主项目及 Windows x64 Runtime。
       - name: 恢复服务端依赖
-        run: dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64
+        run: |
+          dotnet restore EpinelPS/EpinelPS.csproj \
+            --runtime win-x64 \
+            --verbosity normal
 
       - name: 发布 Windows x64 服务端
         run: >-
