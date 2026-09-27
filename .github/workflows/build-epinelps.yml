@@ -1,9 +1,5 @@
 name: Build EpinelPS
 
-# 用诊断验证过能在 Depot 跑通的配方（checkout@v7 + setup-dotnet@v6 + cache@v6 +
-# NUGET_PACKAGES=workspace + `dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64`）。
-# NuGet/MSBuild RestoreTask 偶发无日志失败时，restore 最多自动重试 3 次。
-
 on:
   workflow_dispatch:
     inputs:
@@ -29,6 +25,7 @@ jobs:
     outputs:
       build: ${{ steps.c.outputs.build }}
       server_commit: ${{ steps.c.outputs.server_commit }}
+
     steps:
       - id: c
         env:
@@ -51,13 +48,17 @@ jobs:
     needs: check
     if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
+
     env:
       SERVER_COMMIT: ${{ needs.check.outputs.server_commit }}
+
       R2_BUCKET: tianjg-update
       R2_PREFIX: EpinelPS
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: auto
@@ -82,39 +83,17 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: 缓存 NuGet 包
-        uses: actions/cache@v6
-        with:
-          path: ${{ env.NUGET_PACKAGES }}
-          key: ${{ runner.os }}-nuget-${{ hashFiles('EpinelPS/EpinelPS.csproj', 'EpinelPS.Analyzers/EpinelPS.Analyzers.csproj') }}
-          restore-keys: |
-            ${{ runner.os }}-nuget-
-
       - name: 恢复服务端依赖
-        shell: bash
-        run: |
-          for attempt in 1 2 3; do
-            echo "Restore attempt $attempt/3"
-
-            if dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64; then
-              echo "Restore succeeded."
-              exit 0
-            fi
-
-            if [ "$attempt" -lt 3 ]; then
-              echo "Restore failed, retrying in 10 seconds..."
-              sleep 10
-            fi
-          done
-
-          echo "Restore failed after 3 attempts."
-          exit 1
+        run: dotnet restore EpinelPS/EpinelPS.csproj --runtime win-x64
 
       - name: 发布 Windows x64 服务端
         run: >-
           dotnet publish EpinelPS/EpinelPS.csproj
-          --configuration Release --runtime win-x64 --self-contained true
-          --no-restore -p:PublishSingleFile=true
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          --no-restore
+          -p:PublishSingleFile=true
           --output ./bin/publish/epinelps-windows
 
       - name: 打包
@@ -151,15 +130,15 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --limit 200 \
             --json tagName \
-            --jq '.[].tagName | select(startswith("epinelps-"))' |
-          while read -r t; do
-            if [ -n "$t" ] && [ "$t" != "$TAG" ]; then
-              gh release delete "$t" \
-                --repo "$GITHUB_REPOSITORY" \
-                --cleanup-tag \
-                --yes
-            fi
-          done
+            --jq '.[].tagName | select(startswith("epinelps-"))' \
+            | while read -r t; do
+                if [ -n "$t" ] && [ "$t" != "$TAG" ]; then
+                  gh release delete "$t" \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --cleanup-tag \
+                    --yes
+                fi
+              done
 
       - name: 上传 R2 + 索引
         run: |
@@ -240,6 +219,7 @@ jobs:
     needs: [check, build]
     if: always()
     runs-on: ubuntu-24.04
+
     permissions:
       actions: write
 
@@ -253,10 +233,10 @@ jobs:
             --workflow build-epinelps.yml \
             --limit 200 \
             --json databaseId,status \
-            --jq '[.[] | select(.status=="completed")] | .[1:][].databaseId' |
-          while read -r id; do
-            if [ -n "$id" ]; then
-              gh run delete "$id" \
-                --repo "$GITHUB_REPOSITORY" || true
-            fi
-          done
+            --jq '[.[] | select(.status=="completed")] | .[1:][].databaseId' \
+            | while read -r id; do
+                if [ -n "$id" ]; then
+                  gh run delete "$id" \
+                    --repo "$GITHUB_REPOSITORY" || true
+                fi
+              done
