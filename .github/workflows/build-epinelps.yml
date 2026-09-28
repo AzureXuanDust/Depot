@@ -189,14 +189,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: 取蓝奏云 API 库
         uses: actions/checkout@v4
         with:
           repository: AzureXuanVerse/LanZouCloud-API
           token: ${{ secrets.GH_PAT }}
           path: lanzou-api-repo
-
       - name: 上传蓝奏云
         env:
           LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
@@ -205,17 +203,9 @@ jobs:
         run: |
           python -m pip install --quiet --upgrade pip
           pip install --quiet requests requests_toolbelt aiohttp asyncio
-
           SITE=$(python -c "import site; print(site.getsitepackages()[0])")
-
-          cp -r \
-            lanzou-api-repo/lanzou_windfollowingheart \
-            "$SITE/"
-
-          cp \
-            lanzou-api-repo/lanzou_upload_workflow.py \
-            .
-
+          cp -r lanzou-api-repo/lanzou_windfollowingheart "$SITE/"
+          cp lanzou-api-repo/lanzou_upload_workflow.py .
           python lanzou_upload_workflow.py
 
   cleanup:
