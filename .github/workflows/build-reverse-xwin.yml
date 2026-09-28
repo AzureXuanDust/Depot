@@ -1,0 +1,65 @@
+name: Build Reverse (xwin 对比)
+
+# 对比实验：ubuntu + cargo-xwin 交叉编译出 msvc 三件套（与 windows-latest 原生同目标
+# x86_64-pc-windows-msvc，产物等价）。只编译 + 打包 + 传 artifact，**不发布 Release/R2/蓝奏**，
+# 不干扰正式 build-reverse。手动触发，用来对比构建时长与产物；跑通再决定要不要替换正式构建。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: enigma-P 分支/commit（默认 main）
+        required: false
+        default: main
+
+concurrency:
+  group: build-reverse-xwin
+  cancel-in-progress: true
+
+env:
+  SERVER_REPO: AzureXuanVerse/enigma-P
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出 enigma-P
+        uses: actions/checkout@v7
+        with:
+          repository: AzureXuanVerse/enigma-P
+          token: ${{ secrets.GH_PAT }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: 安装 clang / lld / llvm / nasm（cargo-xwin + ring 需要）
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm nasm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-12-06
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            ~/.cache/cargo-xwin
+            target
+          key: ${{ runner.os }}-reverse-xwin-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-reverse-xwin-
+      - name: 安装 cargo-xwin
+        run: cargo install --locked cargo-xwin
+      - name: cargo xwin 编译三件套（msvc）
+        run: cargo xwin build --release --target x86_64-pc-windows-msvc -p gameserver -p sdkserver -p muipserver
+      - name: 打包
+        run: |
+          set -euo pipefail
+          d=target/x86_64-pc-windows-msvc/release
+          mkdir -p out
+          cp "$d/gameserver.exe" "$d/sdkserver.exe" "$d/muipserver.exe" out/
+          ( cd out && tar -czf ../enigma-server-xwin.tar.gz gameserver.exe sdkserver.exe muipserver.exe )
+          ls -al out enigma-server-xwin.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: enigma-server-xwin
+          path: enigma-server-xwin.tar.gz
