@@ -1,0 +1,238 @@
+name: Build Reverse
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 强制重建发布（即使上游未变）
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-reverse
+  cancel-in-progress: false
+
+env:
+  SERVER_REPO: AzureXuanVerse/enigma-P
+  DATA_REPO: https://gitlab.com/yoncodes/sonetto-data.git
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      build_server: ${{ steps.c.outputs.build_server }}
+      build_data: ${{ steps.c.outputs.build_data }}
+      server_commit: ${{ steps.c.outputs.server_commit }}
+      data_commit: ${{ steps.c.outputs.data_commit }}
+    steps:
+      - id: c
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          server_commit=$(git ls-remote "https://x-access-token:${GH_PAT}@github.com/${SERVER_REPO}.git" HEAD | cut -f1)
+          data_commit=$(git ls-remote "$DATA_REPO" HEAD | cut -f1)
+          echo "server_commit=$server_commit" >> "$GITHUB_OUTPUT"
+          echo "data_commit=$data_commit" >> "$GITHUB_OUTPUT"
+          sp=$(curl -fsSL "https://upd.tianjg.com/Reverse/server.json?t=$RANDOM" || echo '{}')
+          dp=$(curl -fsSL "https://upd.tianjg.com/Reverse/data.json?t=$RANDOM" || echo '{}')
+          sc=$(echo "$sp" | grep -o '"server_commit":"[^"]*"' | cut -d'"' -f4)
+          dc=$(echo "$dp" | grep -o '"data_commit":"[^"]*"' | cut -d'"' -f4)
+          if [ "${{ inputs.force }}" = "true" ] || [ -z "$sc" ] || [ "$server_commit" != "$sc" ]; then
+            echo "build_server=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_server=false" >> "$GITHUB_OUTPUT"; echo "服务端未变（$server_commit），跳过"
+          fi
+          if [ "${{ inputs.force }}" = "true" ] || [ -z "$dc" ] || [ "$data_commit" != "$dc" ]; then
+            echo "build_data=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_data=false" >> "$GITHUB_OUTPUT"; echo "数据未变（$data_commit），跳过"
+          fi
+  build-server:
+    needs: check
+    if: needs.check.outputs.build_server == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      SERVER_COMMIT: ${{ needs.check.outputs.server_commit }}
+      R2_BUCKET: tianjg-update
+      R2_PREFIX: Reverse
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
+    steps:
+      - name: 版本号
+        shell: bash
+        run: echo "VERSION=v$(TZ=Asia/Shanghai date +%Y.%m.%d-%H.%M)-$(echo "$SERVER_COMMIT" | cut -c1-7)" >> "$GITHUB_ENV"
+      - name: 检出服务端源码（enigma-P main）
+        uses: actions/checkout@v7
+        with:
+          repository: AzureXuanVerse/enigma-P
+          token: ${{ secrets.GH_PAT }}
+          ref: ${{ needs.check.outputs.server_commit }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-12-06
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-reverse-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-reverse-cargo-
+      - name: 编译三件套（gameserver / sdkserver / muipserver）
+        run: cargo build --release --target x86_64-pc-windows-msvc -p gameserver -p sdkserver -p muipserver
+      - name: 打包（三个 exe，保留用户 config.toml / data / db）
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-packages
+          d=target/x86_64-pc-windows-msvc/release
+          tar -czf "release-packages/enigma-server-${VERSION}-windows-x86_64.tar.gz" -C "$d" gameserver.exe sdkserver.exe muipserver.exe
+          ls -al release-packages/
+      - name: 发布到 Depot Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="reverse-server-${VERSION}"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$TAG" release-packages/*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --title "Reverse Server ${VERSION}" --notes "enigma@${SERVER_COMMIT}"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName \
+            --jq '.[].tagName | select(startswith("reverse-server-"))' \
+            | while read -r t; do
+                if [ -n "$t" ] && [ "$t" != "$TAG" ]; then gh release delete "$t" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes; fi
+              done
+      - name: 上传 R2 + 索引（server.json）
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="s3://${R2_BUCKET}/${R2_PREFIX}"
+          name="enigma-server-${VERSION}-windows-x86_64.tar.gz"; tag="reverse-server-${VERSION}"; ver="${VERSION#v}"
+          size=$(stat -c %s "release-packages/$name"); sha=$(sha256sum "release-packages/$name" | cut -d' ' -f1)
+          aws s3 cp "release-packages/$name" "$base/$name" --endpoint-url "$R2_ENDPOINT" --content-type application/gzip --cache-control "public, max-age=31536000, immutable"
+          printf '{"version":"%s","tag":"%s","archive":"%s","size":%s,"sha256":"%s","server_commit":"%s"}\n' \
+            "$ver" "$tag" "$name" "$size" "$sha" "$SERVER_COMMIT" > server.json
+          aws s3 cp server.json "$base/server.json" --endpoint-url "$R2_ENDPOINT" --content-type application/json --cache-control "no-cache, max-age=30"
+          aws s3 rm "$base/" --recursive --endpoint-url "$R2_ENDPOINT" --exclude "*" --include "enigma-server-*.tar.gz" --exclude "$name"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 取蓝奏云 API 库
+        uses: actions/checkout@v4
+        with:
+          repository: AzureXuanVerse/LanZouCloud-API
+          token: ${{ secrets.GH_PAT }}
+          path: lanzou-api-repo
+      - name: 上传蓝奏云
+        shell: bash
+        env:
+          LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
+          LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
+          PROJECT_NAME: Reverse
+        run: |
+          python -m pip install --quiet --upgrade pip
+          pip install --quiet requests requests_toolbelt aiohttp asyncio
+          SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+          cp -r lanzou-api-repo/lanzou_windfollowingheart "$SITE/"
+          cp lanzou-api-repo/lanzou_upload_workflow.py .
+          python lanzou_upload_workflow.py
+  build-data:
+    needs: check
+    if: needs.check.outputs.build_data == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      DATA_COMMIT: ${{ needs.check.outputs.data_commit }}
+      R2_BUCKET: tianjg-update
+      R2_PREFIX: Reverse
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
+    steps:
+      - name: 版本号
+        run: echo "VERSION=v$(TZ=Asia/Shanghai date +%Y.%m.%d-%H.%M)-$(echo "$DATA_COMMIT" | cut -c1-7)" >> "$GITHUB_ENV"
+      - name: 克隆并打包数据（excel2json → .zip，不编译）
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "$DATA_REPO" sonetto-data
+          mkdir -p release-packages
+          ( cd sonetto-data && zip -qr "$GITHUB_WORKSPACE/release-packages/sonetto-data-${VERSION}.zip" excel2json )
+          ls -al release-packages/
+      - name: 发布到 Depot Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="reverse-data-${VERSION}"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$TAG" release-packages/*.zip \
+            --repo "$GITHUB_REPOSITORY" --title "Reverse Data ${VERSION}" --notes "sonetto-data@${DATA_COMMIT}"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName \
+            --jq '.[].tagName | select(startswith("reverse-data-"))' \
+            | while read -r t; do
+                if [ -n "$t" ] && [ "$t" != "$TAG" ]; then gh release delete "$t" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes; fi
+              done
+      - name: 上传 R2 + 索引（data.json）
+        run: |
+          set -euo pipefail
+          base="s3://${R2_BUCKET}/${R2_PREFIX}"
+          name="sonetto-data-${VERSION}.zip"; tag="reverse-data-${VERSION}"; ver="${VERSION#v}"
+          size=$(stat -c %s "release-packages/$name"); sha=$(sha256sum "release-packages/$name" | cut -d' ' -f1)
+          aws s3 cp "release-packages/$name" "$base/$name" --endpoint-url "$R2_ENDPOINT" --content-type application/zip --cache-control "public, max-age=31536000, immutable"
+          printf '{"version":"%s","tag":"%s","archive":"%s","size":%s,"sha256":"%s","data_commit":"%s"}\n' \
+            "$ver" "$tag" "$name" "$size" "$sha" "$DATA_COMMIT" > data.json
+          aws s3 cp data.json "$base/data.json" --endpoint-url "$R2_ENDPOINT" --content-type application/json --cache-control "no-cache, max-age=30"
+          aws s3 rm "$base/" --recursive --endpoint-url "$R2_ENDPOINT" --exclude "*" --include "sonetto-data-*.zip" --exclude "$name"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 取蓝奏云 API 库
+        uses: actions/checkout@v4
+        with:
+          repository: AzureXuanVerse/LanZouCloud-API
+          token: ${{ secrets.GH_PAT }}
+          path: lanzou-api-repo
+      - name: 上传蓝奏云
+        env:
+          LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
+          LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
+          PROJECT_NAME: Reverse
+        run: |
+          python -m pip install --quiet --upgrade pip
+          pip install --quiet requests requests_toolbelt aiohttp asyncio
+          SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+          cp -r lanzou-api-repo/lanzou_windfollowingheart "$SITE/"
+          cp lanzou-api-repo/lanzou_upload_workflow.py .
+          python lanzou_upload_workflow.py
+
+  cleanup:
+    needs: [check, build-server, build-data]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: 只保留最新 1 条运行记录
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow build-reverse.yml \
+            --limit 200 --json databaseId,status \
+            --jq '[.[] | select(.status=="completed")] | .[1:][].databaseId' \
+            | while read -r id; do
+                if [ -n "$id" ]; then gh run delete "$id" --repo "$GITHUB_REPOSITORY" || true; fi
+              done
