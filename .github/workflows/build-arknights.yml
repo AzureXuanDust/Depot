@@ -129,24 +129,20 @@ jobs:
           aws s3 rm "${base}/" --recursive --endpoint-url "$R2_ENDPOINT" \
             --exclude "*" --include "Resources-*.zip" --exclude "${name}"
 
-      - name: 上传蓝奏云
-        uses: actions/checkout@v4
+      - name: 检出 Depot 内置蓝奏上传器
+        uses: actions/checkout@v7
         with:
-          repository: AzureXuanVerse/LanZouCloud-API
-          token: ${{ secrets.GH_PAT }}
-          path: lanzou-api-repo
+          path: depot
+          sparse-checkout: tools/lanzou-upload-linux-x86_64
+          sparse-checkout-cone-mode: false
       - name: 蓝奏云上传
         env:
           LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
           LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
           PROJECT_NAME: Arknights
         run: |
-          python -m pip install --quiet --upgrade pip
-          pip install --quiet requests requests_toolbelt aiohttp asyncio
-          SITE=$(python -c "import site; print(site.getsitepackages()[0])")
-          cp -r lanzou-api-repo/lanzou_windfollowingheart "$SITE/"
-          cp lanzou-api-repo/lanzou_upload_workflow.py .
-          python lanzou_upload_workflow.py
+          chmod +x depot/tools/lanzou-upload-linux-x86_64
+          depot/tools/lanzou-upload-linux-x86_64
 
   cleanup:
     needs: [check, build]
