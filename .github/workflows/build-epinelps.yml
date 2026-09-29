@@ -120,27 +120,20 @@ jobs:
           aws s3 cp latest.json "$base/latest.json" --endpoint-url "$R2_ENDPOINT" --content-type application/json --cache-control "no-cache, max-age=30"
           aws s3 rm "$base/" --recursive --endpoint-url "$R2_ENDPOINT" --exclude "*" --include "EpinelPS-*.tar.gz" --exclude "$name"
 
-      - uses: actions/setup-python@v5
+      - name: 检出 Depot 内置蓝奏上传器
+        uses: actions/checkout@v7
         with:
-          python-version: '3.12'
-      - name: 取蓝奏云 API 库
-        uses: actions/checkout@v4
-        with:
-          repository: AzureXuanVerse/LanZouCloud-API
-          token: ${{ secrets.GH_PAT }}
-          path: lanzou-api-repo
+          path: depot
+          sparse-checkout: tools/lanzou-upload-linux-x86_64
+          sparse-checkout-cone-mode: false
       - name: 上传蓝奏云
         env:
           LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
           LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
           PROJECT_NAME: EpinelPS
         run: |
-          python -m pip install --quiet --upgrade pip
-          pip install --quiet requests requests_toolbelt aiohttp asyncio
-          SITE=$(python -c "import site; print(site.getsitepackages()[0])")
-          cp -r lanzou-api-repo/lanzou_windfollowingheart "$SITE/"
-          cp lanzou-api-repo/lanzou_upload_workflow.py .
-          python lanzou_upload_workflow.py
+          chmod +x depot/tools/lanzou-upload-linux-x86_64
+          depot/tools/lanzou-upload-linux-x86_64
 
   cleanup:
     needs: [check, build]
