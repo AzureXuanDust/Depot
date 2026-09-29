@@ -34,12 +34,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm nasm
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-12-06
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
-      - name: 安装 Windows MSVC Rust target
+      - name: 验证 Rust 工具链与 target
         run: |
-          rustup target add x86_64-pc-windows-msvc --toolchain nightly-2025-12-06
-          rustup target list --installed --toolchain nightly-2025-12-06
+          rustup show active-toolchain
+          rustup target add x86_64-pc-windows-msvc --toolchain stable
+          rustup target list --installed --toolchain stable
+          rustc -Vv
       - uses: actions/cache@v6
         with:
           path: |
@@ -54,7 +56,7 @@ jobs:
       - name: 安装 cargo-xwin
         run: cargo install --locked cargo-xwin
       - name: cargo xwin 编译三件套（msvc）
-        run: cargo xwin build --release --target x86_64-pc-windows-msvc -p gameserver -p sdkserver -p muipserver
+        run: cargo +stable xwin build --release --target x86_64-pc-windows-msvc -p gameserver -p sdkserver -p muipserver
       - name: 打包
         run: |
           set -euo pipefail
