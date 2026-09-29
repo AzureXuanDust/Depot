@@ -36,6 +36,10 @@ jobs:
         with:
           toolchain: nightly-2025-12-06
           targets: x86_64-pc-windows-msvc
+      - name: 安装 Windows MSVC Rust target
+        run: |
+          rustup target add x86_64-pc-windows-msvc --toolchain nightly-2025-12-06
+          rustup target list --installed --toolchain nightly-2025-12-06
       - uses: actions/cache@v6
         with:
           path: |
