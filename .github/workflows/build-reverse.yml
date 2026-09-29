@@ -41,12 +41,24 @@ jobs:
           dp=$(curl -fsSL "https://upd.tianjg.com/Reverse/data.json?t=$RANDOM" || echo '{}')
           sc=$(echo "$sp" | grep -o '"server_commit":"[^"]*"' | cut -d'"' -f4)
           dc=$(echo "$dp" | grep -o '"data_commit":"[^"]*"' | cut -d'"' -f4)
-          if [ "${{ inputs.force_server }}" = "true" ] || [ -z "$sc" ] || [ "$server_commit" != "$sc" ]; then
+          if [ "${{ inputs.force_server }}" = "true" ]; then
+            echo "build_server=true" >> "$GITHUB_OUTPUT"
+            echo "已强制重建服务端"
+          elif [ "${{ inputs.force_data }}" = "true" ]; then
+            echo "build_server=false" >> "$GITHUB_OUTPUT"
+            echo "仅强制重建数据，跳过服务端"
+          elif [ -z "$sc" ] || [ "$server_commit" != "$sc" ]; then
             echo "build_server=true" >> "$GITHUB_OUTPUT"
           else
             echo "build_server=false" >> "$GITHUB_OUTPUT"; echo "服务端未变（$server_commit），跳过"
           fi
-          if [ "${{ inputs.force_data }}" = "true" ] || [ -z "$dc" ] || [ "$data_commit" != "$dc" ]; then
+          if [ "${{ inputs.force_data }}" = "true" ]; then
+            echo "build_data=true" >> "$GITHUB_OUTPUT"
+            echo "已强制重建数据包"
+          elif [ "${{ inputs.force_server }}" = "true" ]; then
+            echo "build_data=false" >> "$GITHUB_OUTPUT"
+            echo "仅强制重建服务端，跳过数据包"
+          elif [ -z "$dc" ] || [ "$data_commit" != "$dc" ]; then
             echo "build_data=true" >> "$GITHUB_OUTPUT"
           else
             echo "build_data=false" >> "$GITHUB_OUTPUT"; echo "数据未变（$data_commit），跳过"
