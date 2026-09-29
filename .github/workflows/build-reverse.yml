@@ -3,8 +3,12 @@ name: Build Reverse
 on:
   workflow_dispatch:
     inputs:
-      force:
-        description: 强制重建发布（即使上游未变）
+      force_server:
+        description: 强制重建发布服务端（即使上游未变）
+        type: boolean
+        default: false
+      force_data:
+        description: 强制重建发布数据包（即使上游未变）
         type: boolean
         default: false
 
@@ -37,12 +41,12 @@ jobs:
           dp=$(curl -fsSL "https://upd.tianjg.com/Reverse/data.json?t=$RANDOM" || echo '{}')
           sc=$(echo "$sp" | grep -o '"server_commit":"[^"]*"' | cut -d'"' -f4)
           dc=$(echo "$dp" | grep -o '"data_commit":"[^"]*"' | cut -d'"' -f4)
-          if [ "${{ inputs.force }}" = "true" ] || [ -z "$sc" ] || [ "$server_commit" != "$sc" ]; then
+          if [ "${{ inputs.force_server }}" = "true" ] || [ -z "$sc" ] || [ "$server_commit" != "$sc" ]; then
             echo "build_server=true" >> "$GITHUB_OUTPUT"
           else
             echo "build_server=false" >> "$GITHUB_OUTPUT"; echo "服务端未变（$server_commit），跳过"
           fi
-          if [ "${{ inputs.force }}" = "true" ] || [ -z "$dc" ] || [ "$data_commit" != "$dc" ]; then
+          if [ "${{ inputs.force_data }}" = "true" ] || [ -z "$dc" ] || [ "$data_commit" != "$dc" ]; then
             echo "build_data=true" >> "$GITHUB_OUTPUT"
           else
             echo "build_data=false" >> "$GITHUB_OUTPUT"; echo "数据未变（$data_commit），跳过"
@@ -117,7 +121,7 @@ jobs:
           set -euo pipefail
           mkdir -p release-packages
           d=target/x86_64-pc-windows-msvc/release
-          tar -czf "release-packages/enigma-server-${VERSION}-windows-x86_64.tar.gz" -C "$d" gameserver.exe sdkserver.exe muipserver.exe
+          tar -czf "release-packages/enigma-server-${VERSION}.tar.gz" -C "$d" gameserver.exe sdkserver.exe muipserver.exe
           ls -al release-packages/
       - name: 发布到 Depot Release
         shell: bash
@@ -139,7 +143,7 @@ jobs:
         run: |
           set -euo pipefail
           base="s3://${R2_BUCKET}/${R2_PREFIX}"
-          name="enigma-server-${VERSION}-windows-x86_64.tar.gz"; tag="reverse-server-${VERSION}"; ver="${VERSION#v}"
+          name="enigma-server-${VERSION}.tar.gz"; tag="reverse-server-${VERSION}"; ver="${VERSION#v}"
           size=$(stat -c %s "release-packages/$name"); sha=$(sha256sum "release-packages/$name" | cut -d' ' -f1)
           aws s3 cp "release-packages/$name" "$base/$name" --endpoint-url "$R2_ENDPOINT" --content-type application/gzip --cache-control "public, max-age=31536000, immutable"
           printf '{"version":"%s","tag":"%s","archive":"%s","size":%s,"sha256":"%s","server_commit":"%s"}\n' \
