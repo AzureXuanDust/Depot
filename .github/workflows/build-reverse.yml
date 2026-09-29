@@ -50,11 +50,12 @@ jobs:
   build-server:
     needs: check
     if: needs.check.outputs.build_server == 'true'
-    runs-on: windows-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
       SERVER_COMMIT: ${{ needs.check.outputs.server_commit }}
+      XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
       R2_BUCKET: tianjg-update
       R2_PREFIX: Reverse
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
@@ -74,21 +75,42 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           ref: ${{ needs.check.outputs.server_commit }}
           fetch-depth: 0
+      - name: 安装交叉编译依赖
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm nasm
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-12-06
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
+      - name: 验证 Rust 工具链与 target
+        run: |
+          rustup target add x86_64-pc-windows-msvc --toolchain stable
+          rustup target list --installed --toolchain stable
+          rustc +stable -Vv
+      - name: 计算 30 天缓存周期
+        id: cache-period
+        shell: bash
+        run: echo "bucket=$(( $(date -u +%s) / 2592000 ))" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-xwin
+            .xwin-cache
             target
-          key: ${{ runner.os }}-reverse-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-reverse-xwin-stable-cargo-xwin-0.23.1-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ steps.cache-period.outputs.bucket }}
           restore-keys: |
-            ${{ runner.os }}-reverse-cargo-
-      - name: 编译三件套（gameserver / sdkserver / muipserver）
-        run: cargo build --release --target x86_64-pc-windows-msvc -p gameserver -p sdkserver -p muipserver
+            ${{ runner.os }}-reverse-xwin-stable-cargo-xwin-0.23.1-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-
+            ${{ runner.os }}-reverse-xwin-stable-cargo-xwin-0.23.1-
+      - name: 安装 cargo-xwin
+        shell: bash
+        run: |
+          if [ ! -x "$HOME/.cargo/bin/cargo-xwin" ]; then
+            cargo install --locked cargo-xwin --version 0.23.1
+          fi
+          cargo-xwin --version
+      - name: 编译三件套（cargo-xwin / MSVC）
+        run: cargo +stable xwin build --release --target x86_64-pc-windows-msvc -p gameserver -p sdkserver -p muipserver
       - name: 打包（三个 exe，保留用户 config.toml / data / db）
         shell: bash
         run: |
@@ -226,6 +248,24 @@ jobs:
     permissions:
       actions: write
     steps:
+      - name: 清理 30 天未访问的 Reverse xwin 缓存
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '30 days ago' +%s)
+          gh cache list --repo "$GITHUB_REPOSITORY" --limit 1000 --json id,key,lastAccessedAt \
+            --jq '.[] | select(.key | startswith("Linux-reverse-xwin-stable-cargo-xwin-0.23.1-")) | [.id, .key, .lastAccessedAt] | @tsv' \
+            | while IFS=$'\t' read -r id key last_accessed; do
+                [ -n "$id" ] || continue
+                accessed=$(date -u -d "$last_accessed" +%s)
+                if [ "$accessed" -lt "$cutoff" ]; then
+                  echo "删除 30 天未访问缓存: $key ($id)"
+                  gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/caches/${id}"
+                fi
+              done
+
       - name: 只保留最新 1 条运行记录
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
