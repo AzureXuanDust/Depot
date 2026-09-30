@@ -1,4 +1,8 @@
-name: Test LanZou Upload
+name: Test LanZou Upload (curl only)
+
+# 仅用 curl 测试蓝奏 html5up.php，不运行 Rust uploader。
+# 用来判断 GitHub runner → 蓝奏线路/账号本身的上传速度。
+# 测试会创建一个临时文件夹，结束后文件需手动清理。
 
 on:
   workflow_dispatch:
@@ -10,18 +14,13 @@ on:
         type: string
 
 concurrency:
-  group: test-lanzou-upload
+  group: test-lanzou-upload-curl
   cancel-in-progress: true
 
 jobs:
   benchmark:
     runs-on: ubuntu-24.04
     steps:
-      - name: 检出 Depot 内置 uploader
-        uses: actions/checkout@v7
-        with:
-          sparse-checkout: tools/lanzou-upload-linux-x86_64
-          sparse-checkout-cone-mode: false
       - name: 安装测试工具
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq
       - name: 生成测试文件
@@ -29,40 +28,24 @@ jobs:
           SIZE_MIB: ${{ inputs.size_mib }}
         run: |
           set -euo pipefail
-          mkdir -p rust-release curl-release
-          dd if=/dev/urandom of="rust-release/benchmark-${SIZE_MIB}MiB.zip" bs=1M count="$SIZE_MIB" status=none
-          cp "rust-release/benchmark-${SIZE_MIB}MiB.zip" curl-release/
-          sha256sum rust-release/* curl-release/*
-      - name: Rust uploader 对照组
+          mkdir -p curl-release
+          dd if=/dev/urandom of="curl-release/benchmark-${SIZE_MIB}MiB.zip" bs=1M count="$SIZE_MIB" status=none
+          sha256sum curl-release/*
+      - name: curl 上传测速
         env:
           LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
           LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
-          PROJECT_NAME: "Rust-Benchmark-${{ github.run_id }}"
-          LANZOU_RELEASE_DIR: rust-release
-        run: |
-          set -euo pipefail
-          chmod +x tools/lanzou-upload-linux-x86_64
-          start=$(date +%s%N)
-          tools/lanzou-upload-linux-x86_64 | tee rust.log
-          end=$(date +%s%N)
-          python3 - <<'PY' "$start" "$end"
-          import sys
-          print(f"RUST_TOTAL_SECONDS={(int(sys.argv[2])-int(sys.argv[1]))/1_000_000_000:.3f}")
-          PY
-      - name: curl 对照组（同一 html5up.php 接口）
-        env:
-          LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
-          LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
-          PROJECT_NAME: "Curl-Benchmark-${{ github.run_id }}"
         run: |
           set -euo pipefail
           COOKIE="ylogin=${LANZOU_YLOGIN}; phpdisk_info=${LANZOU_PHPDISK_INFO}"
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0 Safari/537.36'
           DOUPLOAD='https://pc.woozooo.com/doupload.php'
           UPLOAD='https://pc.woozooo.com/html5up.php'
-          MYDISK='https://pc.woozooo.com/mydisk.php'
-          curl_get() { curl -fsS --http1.1 -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H 'Accept-Language: zh-CN,zh;q=0.9' "$@"; }
-          curl_post() { curl -fsS --http1.1 -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H 'Accept-Language: zh-CN,zh;q=0.9' -d "$@" "$DOUPLOAD"; }
+          curl_post() {
+            local args=() value
+            for value in "$@"; do args+=(-d "$value"); done
+            curl -fsS --http1.1 -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H 'Accept-Language: zh-CN,zh;q=0.9' "${args[@]}" "$DOUPLOAD"
+          }
           folder_list() { curl_post 'task=19' 'file_id=-1'; }
           find_folder() {
             folder_list | jq -r --arg name "$1" '.info[]? | select(.folder_name == $name) | .folder_id' | head -1
@@ -70,7 +53,7 @@ jobs:
           create_folder() {
             local name="$1" before after
             before=$(folder_list | jq -r '.info[]?.folder_id // empty' | sort)
-            curl_post 'task=2' 'parent_id=-1' "folder_name=$name" 'folder_description=Rust vs curl benchmark' \
+            curl_post 'task=2' 'parent_id=-1' "folder_name=$name" 'folder_description=curl benchmark' \
               | jq -e '.zt == 1' >/dev/null
             after=$(folder_list | jq -r '.info[]?.folder_id // empty' | sort)
             comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -1
@@ -97,7 +80,7 @@ jobs:
           folder=$(get_or_create_folder "$project")
           echo "curl folder=$folder"
           clear_folder "$folder"
-          file=$(find curl-release -type f -maxdepth 1 | head -1)
+          file=$(find curl-release -maxdepth 1 -type f | head -1)
           response=$(mktemp)
           start=$(date +%s%N)
           metrics=$(curl --fail-with-body --http1.1 -sS -o "$response" \
@@ -118,7 +101,5 @@ jobs:
       - name: 输出测试结论
         if: always()
         run: |
-          echo '=== Rust 日志 ==='
-          test -f rust.log && tail -20 rust.log || true
-          echo '=== 说明 ==='
-          echo 'Rust 与 curl 使用同一 runner、同一文件、同一 html5up.php 接口；比较两者总耗时和上传速度。'
+          echo '=== curl only ==='
+          echo '本次只测试 curl，不运行 Rust uploader。'
