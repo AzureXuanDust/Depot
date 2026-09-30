@@ -1,0 +1,124 @@
+name: Test LanZou Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      size_mib:
+        description: 测试文件大小（MiB，建议 11）
+        required: false
+        default: '11'
+        type: string
+
+concurrency:
+  group: test-lanzou-upload
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出 Depot 内置 uploader
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: tools/lanzou-upload-linux-x86_64
+          sparse-checkout-cone-mode: false
+      - name: 安装测试工具
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq
+      - name: 生成测试文件
+        env:
+          SIZE_MIB: ${{ inputs.size_mib }}
+        run: |
+          set -euo pipefail
+          mkdir -p rust-release curl-release
+          dd if=/dev/urandom of="rust-release/benchmark-${SIZE_MIB}MiB.zip" bs=1M count="$SIZE_MIB" status=none
+          cp "rust-release/benchmark-${SIZE_MIB}MiB.zip" curl-release/
+          sha256sum rust-release/* curl-release/*
+      - name: Rust uploader 对照组
+        env:
+          LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
+          LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
+          PROJECT_NAME: "Rust-Benchmark-${{ github.run_id }}"
+          LANZOU_RELEASE_DIR: rust-release
+        run: |
+          set -euo pipefail
+          chmod +x tools/lanzou-upload-linux-x86_64
+          start=$(date +%s%N)
+          tools/lanzou-upload-linux-x86_64 | tee rust.log
+          end=$(date +%s%N)
+          python3 - <<'PY' "$start" "$end"
+          import sys
+          print(f"RUST_TOTAL_SECONDS={(int(sys.argv[2])-int(sys.argv[1]))/1_000_000_000:.3f}")
+          PY
+      - name: curl 对照组（同一 html5up.php 接口）
+        env:
+          LANZOU_YLOGIN: ${{ secrets.LANZOU_YLOGIN }}
+          LANZOU_PHPDISK_INFO: ${{ secrets.LANZOU_PHPDISK_INFO }}
+          PROJECT_NAME: "Curl-Benchmark-${{ github.run_id }}"
+        run: |
+          set -euo pipefail
+          COOKIE="ylogin=${LANZOU_YLOGIN}; phpdisk_info=${LANZOU_PHPDISK_INFO}"
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0 Safari/537.36'
+          DOUPLOAD='https://pc.woozooo.com/doupload.php'
+          UPLOAD='https://pc.woozooo.com/html5up.php'
+          MYDISK='https://pc.woozooo.com/mydisk.php'
+          curl_get() { curl -fsS --http1.1 -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H 'Accept-Language: zh-CN,zh;q=0.9' "$@"; }
+          curl_post() { curl -fsS --http1.1 -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H 'Accept-Language: zh-CN,zh;q=0.9' -d "$@" "$DOUPLOAD"; }
+          folder_list() { curl_post 'task=19' 'file_id=-1'; }
+          find_folder() {
+            folder_list | jq -r --arg name "$1" '.info[]? | select(.folder_name == $name) | .folder_id' | head -1
+          }
+          create_folder() {
+            local name="$1" before after
+            before=$(folder_list | jq -r '.info[]?.folder_id // empty' | sort)
+            curl_post 'task=2' 'parent_id=-1' "folder_name=$name" 'folder_description=Rust vs curl benchmark' \
+              | jq -e '.zt == 1' >/dev/null
+            after=$(folder_list | jq -r '.info[]?.folder_id // empty' | sort)
+            comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -1
+          }
+          get_or_create_folder() {
+            local id
+            id=$(find_folder "$1")
+            [ -n "$id" ] && { printf '%s' "$id"; return; }
+            create_folder "$1"
+          }
+          clear_folder() {
+            local id="$1" page=1 json file_id
+            while :; do
+              json=$(curl_post "task=5" "folder_id=$id" "pg=$page")
+              [ "$(jq -r '.info // 0' <<<"$json")" = '0' ] && break
+              while read -r file_id; do
+                [ -n "$file_id" ] || continue
+                curl_post 'task=6' "file_id=$file_id" | jq -e '.zt == 1' >/dev/null
+              done < <(jq -r '.text[]?.id // empty' <<<"$json")
+              page=$((page + 1))
+            done
+          }
+          project="Curl-Benchmark-${{ github.run_id }}"
+          folder=$(get_or_create_folder "$project")
+          echo "curl folder=$folder"
+          clear_folder "$folder"
+          file=$(find curl-release -type f -maxdepth 1 | head -1)
+          response=$(mktemp)
+          start=$(date +%s%N)
+          metrics=$(curl --fail-with-body --http1.1 -sS -o "$response" \
+            -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H 'Accept-Language: zh-CN,zh;q=0.9' \
+            -F 'task=1' -F 'vie=2' -F 've=2' -F 'id=WU_FILE_0' \
+            -F "folder_id_bb_n=$folder" -F "name=$(basename "$file")" \
+            -F "upload_file=@$file;type=application/octet-stream" \
+            -w '%{time_total}\t%{speed_upload}' "$UPLOAD")
+          end=$(date +%s%N)
+          jq -e '.zt == 1' "$response"
+          echo "CURL_TIME_SECONDS=$(cut -f1 <<<"$metrics")"
+          echo "CURL_SPEED_BYTES_PER_SECOND=$(cut -f2 <<<"$metrics")"
+          python3 - <<'PY' "$start" "$end"
+          import sys
+          print(f"CURL_TOTAL_SECONDS={(int(sys.argv[2])-int(sys.argv[1]))/1_000_000_000:.3f}")
+          PY
+          rm -f "$response"
+      - name: 输出测试结论
+        if: always()
+        run: |
+          echo '=== Rust 日志 ==='
+          test -f rust.log && tail -20 rust.log || true
+          echo '=== 说明 ==='
+          echo 'Rust 与 curl 使用同一 runner、同一文件、同一 html5up.php 接口；比较两者总耗时和上传速度。'
