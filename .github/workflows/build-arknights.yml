@@ -16,7 +16,9 @@ concurrency:
 
 env:
   AK_DATA_REPO: https://github.com/Kengxxiao/ArknightsGameData.git
-  SERVER_REPO: https://github.com/pfyy/OpenBachelorS.git
+  # PRTS 只服务 PC 客户端：版本取官方 Windows 配置
+  AK_VERSION_URL: https://ak-conf.hypergryph.com/config/prod/official/Windows/version
+  AK_NETWORK_URL: https://ak-conf.hypergryph.com/config/prod/official/network_config
 
 jobs:
   check:
@@ -24,20 +26,20 @@ jobs:
     outputs:
       build: ${{ steps.c.outputs.build }}
       data_commit: ${{ steps.c.outputs.data_commit }}
-      server_commit: ${{ steps.c.outputs.server_commit }}
     steps:
       - id: c
         run: |
           data_commit=$(git ls-remote "$AK_DATA_REPO" HEAD | cut -f1)
-          server_commit=$(git ls-remote "$SERVER_REPO" HEAD | cut -f1)
           echo "data_commit=$data_commit" >> "$GITHUB_OUTPUT"
-          echo "server_commit=$server_commit" >> "$GITHUB_OUTPUT"
+          # 官方资源版本变了也要重新打包：服务端须下发当前的资源版本，旧版本的资源包官方已不再提供
+          res_version=$(curl -fsSL "$AK_VERSION_URL" | jq -r '.resVersion // empty' || true)
           prev=$(curl -fsSL "https://upd.tianjg.com/Arknights/latest.json?t=$RANDOM" || echo '{}')
-          pd=$(echo "$prev" | grep -o '"data_commit":"[^"]*"' | cut -d'"' -f4)
-          ps=$(echo "$prev" | grep -o '"server_commit":"[^"]*"' | cut -d'"' -f4)
-          if [ "${{ inputs.force }}" != "true" ] && [ -n "$data_commit" ] && [ "$data_commit" = "$pd" ] && [ "$server_commit" = "$ps" ]; then
+          pd=$(echo "$prev" | jq -r '.data_commit // empty' || true)
+          pr=$(echo "$prev" | jq -r '.res_version // empty' || true)
+          if [ "${{ inputs.force }}" != "true" ] && [ -n "$data_commit" ] && [ "$data_commit" = "$pd" ] \
+             && { [ -z "$res_version" ] || [ "$res_version" = "$pr" ]; }; then
             echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "上游未变（data=$data_commit server=$server_commit），跳过"
+            echo "上游未变（data=$data_commit res=$res_version），跳过"
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
@@ -50,7 +52,6 @@ jobs:
       contents: write
     env:
       DATA_COMMIT: ${{ needs.check.outputs.data_commit }}
-      SERVER_COMMIT: ${{ needs.check.outputs.server_commit }}
       R2_BUCKET: tianjg-update
       R2_PREFIX: Arknights
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
@@ -63,36 +64,41 @@ jobs:
       - name: 版本号
         run: echo "VERSION=v$(TZ=Asia/Shanghai date +%Y.%m.%d-%H.%M)-$(echo "$DATA_COMMIT" | cut -c1-7)" >> "$GITHUB_ENV"
 
-      - name: 检出服务端上游（生成 conf 用）
-        uses: actions/checkout@v4
-        with:
-          repository: pfyy/OpenBachelorS
-          path: server
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: snok/install-poetry@v1
-      - name: 生成 conf
-        working-directory: server
-        run: |
-          poetry install --no-interaction
-          poetry run version-updater && poetry run link-updater
-
-      - name: 取 res/excel（公开游戏数据）
+      - name: 取官方表（公开游戏数据）
         uses: actions/checkout@v4
         with:
           repository: Kengxxiao/ArknightsGameData
+          ref: ${{ env.DATA_COMMIT }}
           path: akdata
           sparse-checkout: zh_CN/gamedata/excel/
+
+      - name: 取客户端版本（官方配置）
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL --retry 3 "$AK_VERSION_URL")
+          res_version=$(echo "$ver" | jq -er '.resVersion')
+          client_version=$(echo "$ver" | jq -er '.clientVersion')
+          # network_config 的 content 是 JSON 字符串，configs 的键为功能版本（V0xx），取最大的
+          func_ver=$(curl -fsSL --retry 3 "$AK_NETWORK_URL" | jq -er '.content | fromjson | .configs | keys | max')
+          data_version=$(grep -o 'VersionControl:[0-9.]*' akdata/zh_CN/gamedata/excel/data_version.txt | cut -d: -f2 || true)
+          {
+            echo "RES_VERSION=$res_version"
+            echo "CLIENT_VERSION=$client_version"
+            echo "FUNC_VER=$func_ver"
+            echo "DATA_VERSION=$data_version"
+          } >> "$GITHUB_ENV"
+          echo "资源 $res_version，客户端 $client_version，功能 $func_ver，表 $data_version"
 
       - name: 打包 Resources
         run: |
           set -euo pipefail
-          mkdir -p pkg/res release-packages
-          cp -r akdata/zh_CN/gamedata/excel pkg/res/excel
-          cp -r server/conf pkg/conf
-          rm -f pkg/conf/squad.json pkg/conf/config.json pkg/conf/assist.json
-          (cd pkg && zip -r "${GITHUB_WORKSPACE}/release-packages/Resources-${VERSION}.zip" res/excel conf)
+          # 与服务端目录一致：gamedata/excel 为官方表；gamedata/client.json 由 PRTS 作为配置读入（优先于 appsettings.json）
+          mkdir -p pkg/gamedata release-packages
+          cp -r akdata/zh_CN/gamedata/excel pkg/gamedata/excel
+          jq -n --arg c "$CLIENT_VERSION" --arg r "$RES_VERSION" --arg f "$FUNC_VER" \
+            '{PRTS: {Client: {ClientVersion: $c, ResVersion: $r, FuncVer: $f}}}' > pkg/gamedata/client.json
+          cat pkg/gamedata/client.json
+          (cd pkg && zip -r "${GITHUB_WORKSPACE}/release-packages/Resources-${VERSION}.zip" gamedata)
           ls -al release-packages/
 
       - name: 发布到本仓库 Release
@@ -106,7 +112,7 @@ jobs:
             "release-packages/Resources-${VERSION}.zip#Resources-${VERSION}.zip" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Arknights ${VERSION}" \
-            --notes "res/excel@${DATA_COMMIT} conf@${SERVER_COMMIT}"
+            --notes "gamedata/excel@${DATA_COMMIT}（表 ${DATA_VERSION}）；Windows 资源 ${RES_VERSION}，客户端 ${CLIENT_VERSION}，功能 ${FUNC_VER}"
           gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName \
             --jq '.[].tagName | select(startswith("arknights-"))' \
             | while read -r t; do
@@ -122,8 +128,10 @@ jobs:
           base="s3://${R2_BUCKET}/${R2_PREFIX}"
           aws s3 cp "release-packages/${name}" "${base}/${name}" --endpoint-url "$R2_ENDPOINT" \
             --content-type application/zip --cache-control "public, max-age=31536000, immutable"
-          printf '{"version":"%s","tag":"arknights-%s","archive":"%s","size":%s,"sha256":"%s","data_commit":"%s","server_commit":"%s"}\n' \
-            "$VERSION" "$VERSION" "$name" "$size" "$sha" "$DATA_COMMIT" "$SERVER_COMMIT" > latest.json
+          jq -nc --arg version "$VERSION" --arg archive "$name" --argjson size "$size" --arg sha256 "$sha" \
+            --arg data_commit "$DATA_COMMIT" --arg res_version "$RES_VERSION" --arg client_version "$CLIENT_VERSION" \
+            '{version: $version, tag: ("arknights-" + $version), archive: $archive, size: $size, sha256: $sha256,
+              data_commit: $data_commit, res_version: $res_version, client_version: $client_version}' > latest.json
           aws s3 cp latest.json "${base}/latest.json" --endpoint-url "$R2_ENDPOINT" \
             --content-type application/json --cache-control "no-cache, max-age=30"
           aws s3 rm "${base}/" --recursive --endpoint-url "$R2_ENDPOINT" \
